@@ -164,9 +164,11 @@ public sealed class Summary : Collector<Summary.Child>, ISummary
 
             try
             {
-                lock (_bufLock)
+                _bufLock.Wait();
+                try
                 {
-                    lock (_lock)
+                    _lock.Wait();
+                    try
                     {
                         // Swap bufs even if hotBuf is empty to set new hotBufExpTime.
                         SwapBufs(now);
@@ -183,6 +185,14 @@ public sealed class Summary : Collector<Summary.Child>, ISummary
                             values[valuesIndex++] = (quantile, value);
                         }
                     }
+                    finally
+                    {
+                        _lock.Release();
+                    }
+                }
+                finally
+                {
+                    _bufLock.Release();
                 }
 
                 await serializer.WriteMetricPointAsync(
@@ -232,11 +242,11 @@ public sealed class Summary : Collector<Summary.Child>, ISummary
         private double _hotBufExpUnixtimeSeconds;
 
         // Protects hotBuf and hotBufExpTime.
-        private readonly object _bufLock = new();
+        private readonly SemaphoreSlim _bufLock = new(1, 1);
 
         // Protects every other moving part.
         // Lock bufMtx before mtx if both are needed.
-        private readonly object _lock = new();
+        private readonly SemaphoreSlim  _lock = new(1, 1);
 
         public void Observe(double val)
         {
@@ -251,8 +261,10 @@ public sealed class Summary : Collector<Summary.Child>, ISummary
             if (double.IsNaN(val))
                 return;
 
-            lock (_bufLock)
+            
+            try
             {
+                _bufLock.Wait();
                 if (nowUnixtimeSeconds > _hotBufExpUnixtimeSeconds)
                     Flush(nowUnixtimeSeconds);
 
@@ -261,6 +273,10 @@ public sealed class Summary : Collector<Summary.Child>, ISummary
                 if (_hotBuf.IsFull)
                     Flush(nowUnixtimeSeconds);
             }
+            finally
+            {
+                _bufLock.Release();
+            }
 
             Publish();
         }
@@ -268,13 +284,18 @@ public sealed class Summary : Collector<Summary.Child>, ISummary
         // Flush needs bufMtx locked.
         private void Flush(double nowUnixtimeSeconds)
         {
-            lock (_lock)
+            try
             {
+                _lock.Wait();
                 SwapBufs(nowUnixtimeSeconds);
 
                 // Go version flushes on a separate goroutine, but doing this on another
                 // thread actually makes the benchmark tests slower in .net
                 FlushColdBuf();
+            }
+            finally
+            {
+                _lock.Release();
             }
         }
 
